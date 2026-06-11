@@ -48,7 +48,7 @@
   ```  
 
 ## start_marker
-  开始截取标识（仅[full_text_yn](#full_text_yn) = 0时生效）。
+  开始截取标识`开放文本`（仅[full_text_yn](#full_text_yn) = 0时生效）。
   指定 SAS转换为TXT的首行标识（输出不含首行）。
 
   default  
@@ -58,7 +58,7 @@
 
 
 ## end_marker
-  截取结束标识（仅[full_text_yn](#full_text_yn) = 0时生效）。
+  截取结束标识`开放文本`（仅[full_text_yn](#full_text_yn) = 0时生效）。
   指定 SAS转换为TXT的末行标识（输出不含末行）。
 
   default  
