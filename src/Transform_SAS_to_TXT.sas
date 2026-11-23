@@ -12,170 +12,189 @@
 		input_dir 		:  需转换的SAS文件所在文件夹地址
 		output_dir		:  存放转换后TXT文件的文件夹地址
 		full_text_yn	:  原始文件是否全文输出？（1-是，0-否；默认为0-否）
-		start_marker 	:  开始截取的标识符号，默认为“SUBMIT BEGIN”，当 Must_marker_yn=1 时生效
-		end_marker   	:  截取结束的标识符号，默认为“SUBMIT END”，当 Must_marker_yn=1 时生效
+		start_marker 	:  开始截取的标识符号，默认为“SUBMIT BEGIN”，当 full_text_yn=0 时生效
+		end_marker   	:  截取结束的标识符号，默认为“SUBMIT END”，当 full_text_yn=0 时生效
 */
 
 
 
-/* ------------------确保输入SAS文件所在目录，转换后TXT文件输出目录存在----------------- */
+/* ------------------检查输入、输出目录----------------- */
 data _null_;
-    inpath = "&input_dir.";
-	outpath = "&output_dir.";
-	if fileexist(inpath) then do;
-        put "NOTE: 输出目录存在: " inpath;
-		call symputx('input_exists', '1');
-	end;
-    else do;
-        put "WARNING: 输入的SAS文件所在目录不存在 -> " inpath;
-        put "WARNING: 请确保该目录已手动创建，否则程序将无法读取SAS文件。";
-		call symputx('input_exists', '0');
+    length inpath outpath $2000;
+    inpath = symget('input_dir');
+    outpath = symget('output_dir');
+
+    /* 用 DOPEN 检查输入目录，避免 FILEEXIST 对目录判断不稳定 */
+    rc_in = filename('checkin', inpath);
+    did = dopen('checkin');
+    if did > 0 then do;
+        put "NOTE: 输入目录存在: " inpath;
+        call symputx('input_exists', '1');
+        rc_close = dclose(did);
     end;
+    else do;
+        put "WARNING: 输入的SAS文件所在目录无法打开 -> " inpath;
+        call symputx('input_exists', '0');
+    end;
+    rc_clear = filename('checkin');
+
     if fileexist(outpath) then do;
         put "NOTE: 输出目录存在: " outpath;
-		call symputx('output_exists', '1');
-	end;
+        call symputx('output_exists', '1');
+    end;
     else do;
         put "WARNING: 输出的存放转换后TXT文件目录不存在 -> " outpath;
         put "WARNING: 请确保该目录已手动创建，否则程序将无法写入TXT文件。";
-		call symputx('output_exists', '0');
+        call symputx('output_exists', '0');
     end;
 run;
 
-
-/* ------------------如果任一目录不存在，则终止宏，不执行后续转换-------------------- */
 %if &input_exists = 0 or &output_exists = 0 %then %do;
-    %put ERROR: 由于目录不存在，宏将退出，不执行批量转换。;
+    %put ERROR: 由于目录不存在或无法打开，宏将退出，不执行批量转换。;
     %return;
 %end;
 
+/* ------------------通过 DOPEN/DREAD 获取 SAS 文件清单------------------ */
+data _SAS_filelist;
+    length filepath $2000 filename $512 inputpath $2000;
+    inputpath = symget('input_dir');
 
+    rc = filename('indir', inputpath);
+    did = dopen('indir');
 
-/* -------------------------------------批量处理------------------------------------ */
-/* 不考虑截断标识，原文件全文输出 */
-%if &full_text_yn = 1 %then %do;
-	data _null_;
-	    length filepath $1000 outpath $1000 line $32767;
-	    /* 获取所有.sas文件列表 */
-	    infile "&input_dir.\*.sas" filename=filepath eof=done truncover;
-	    input line $32767.;
-	    /* 检测文件切换 */
-	    if _n_ = 1 or filepath ne lag(filepath) then do;
-	        /* 构建输出文件路径 */
-	        filename = scan(filepath, -2, '.\');
-	        outpath = cats("&output_dir.\", filename, '.txt');
-	        put "处理文件: " filepath;
-	    end;
-	    /* 使用FILE语句，通过FILEVAR动态指定输出文件 */
-	    file dummy filevar=outpath;
-	    /* 全文逐行输出 */
-	    put line;
-	    return;
-	    done:stop;
-	run;
-	%put note: 所有文件均按照原SAS文件全文转换为TXT文件. ;
+    if did <= 0 then do;
+        put "ERROR: 无法打开输入目录: " inputpath;
+        stop;
+    end;
+
+    do i = 1 to dnum(did);
+        filename = dread(did, i);
+        if lowcase(scan(filename, -1, '.')) = 'sas' then do;
+            filepath = catx('\', inputpath, filename);
+            output;
+        end;
+    end;
+
+    rc_close = dclose(did);
+    rc_clear = filename('indir');
+
+    keep filepath filename;
+run;
+
+/* 检查是否找到 SAS 文件 */
+data _null_;
+    if 0 then set _SAS_filelist nobs=n;
+    call symputx('sas_file_count', n);
+    if n=0 then put "WARNING: 输入目录中未找到 SAS 文件。";
+run;
+
+%if &sas_file_count = 0 %then %do;
+    %put WARNING: 未找到SAS文件，宏结束。;
+    %return;
 %end;
-/* ----------------------------------根据 截断标识 输出------------------------------- */
+
+/* ------------------------------全文转换------------------------------ */
+%if &full_text_yn = 1 %then %do;
+    data _null_;
+        set _SAS_filelist;
+        length outpath $2000 line $32767 basename $512 outputdir $2000 readpath $2000;
+        outputdir = symget('output_dir');
+
+        /* 去除文件名末尾 .sas */
+        basename = substr(filename, 1, lengthn(filename)-4);
+        outpath = cats(outputdir, '\', basename, '.txt');
+
+        put "处理文件: " filepath;
+        put "输出文件: " outpath;
+
+        readpath=filepath;
+        file outref filevar=outpath;
+        infile inref filevar=readpath end=eof truncover;
+        do until(eof);
+            input line $char32767.;
+            put line;
+        end;
+    run;
+
+    %put NOTE: 所有文件均按照原SAS文件全文转换为TXT文件.;
+    proc delete data=_SAS_filelist;
+    quit;
+%end;
+
+/* ------------------------按截取标识转换------------------------ */
 %else %if &full_text_yn = 0 %then %do;
-	/* 扫描两遍，第一遍确认是否有开始标识，第二遍开始逐行输出 */
-	/* 第一步：预扫描所有文件，找出哪些文件包含标识符 */
-	data _Temp_tol_markers;
-	    length filepath $1000 line $32767;
-		/* 依次为：是否有开始标识、是否有结束标识、文件的读取序号（用于hash连接第二步处理） */    
-	    retain has_start_markers 0 has_end_markers 0 fileid 0;
-	    infile "&input_dir.\*.sas" filename=filepath truncover pad end=eof;
-		tem_filename=filepath;
-	    input line $32767.;
-	    /* 文件切换时增加序号 */
-	    if _n_ = 1 or filepath ne lag(filepath) then do;
-	        if _n_ > 1 then do;
-	            /* 输出上一个文件的结果 */
-	            output;
-	        end;
-			/* 序号递增 */
-	        fileid + 1; has_start_markers = 0; has_end_markers = 0;
-	    end;
-	    /* 检查标记 */
-	    if find(upcase(line), upcase("&start_marker.")) then 
-	        has_start_markers = 1;
-		if find(upcase(line), upcase("&end_marker.")) then 
-	        has_end_markers = 1;
-		/* 最后一个文件进行输出 */
-	    if eof then output;        
-	    keep tem_filename fileid has_start_markers has_end_markers;
-	run;
 
+    /* 第一遍：逐文件扫描标识，记录每个文件的标识情况 */
+    data _Temp_tol_markers;
+        set _SAS_filelist;
+        length line $32767 readpath $2000;
+        has_start_markers = 0;
+        has_end_markers = 0;
 
-	/* ---------------------第二步：data步迭代输出所需的每一行------------------- */
-	data _null_;
-	    length filepath $1000 outpath $1000 line $32767;
-		/* 依次为：是否检测到开始标识，是否全文件输出，文件读取序号 */
-	    retain started 0 all_output 0 fileid 0;
-	    /* 加载第一步的标记表，hash连接，Key 使用 fileid */
-	    if _n_ = 1 then do;
-	        declare hash h(dataset:"_Temp_tol_markers");
-	        h.definekey("fileid");
-	        h.definedata("has_start_markers");
-	        h.definedone();
-	        call missing(fileid, has_start_markers);
-	    end;
-	    infile "&input_dir.\*.sas" filename=filepath eof=done truncover;
-	    input line $32767.;
-	    /* 文件切换时：更新序号，并查询标记 */
-	    if _n_ = 1 or filepath ne lag(filepath) then do;
-	        fileid + 1;             /* 序号与第一步严格一致 */
-	        filename = scan(filepath, -2, '.\');
-	        outpath = cats("&output_dir.\", filename, '.txt');
-	        started = 0;
-	        put "处理文件: " filepath;
+        readpath=filepath;
+        infile inref filevar=readpath end=eof truncover;
+        do until(eof);
+            input line $char32767.;
+            if find(upcase(line), upcase("&start_marker.")) then
+                has_start_markers = 1;
+            if find(upcase(line), upcase("&end_marker.")) then
+                has_end_markers = 1;
+        end;
+        output;
+        keep filepath filename has_start_markers has_end_markers;
+    run;
 
-	        rc = h.find(key:fileid);
-	        if rc = 0 and has_start_markers = 1 then 
-	            all_output = 0;    /* 有标记 → 截取输出 */
-	        else 
-	            all_output = 1;    /* 无标记 → 全输出 */
-	    end;
-	    /* 输出 */
-	    file dummy filevar=outpath;
-	    if all_output = 1 then 
-	        put line;
-	    else do;
-	        if find(upcase(line), upcase("&start_marker.")) then started = 1;
-	        else if find(upcase(line), upcase("&end_marker.")) then started = 0;
-	        else if started = 1 then put line;
-	    end;
-	    return;
-	    done: stop;
-	run;
-	/* ------------------------在Log中输出每个文件的转换情况汇总 ----------------------- */
-	%put NOTE: 已完成SAS文件转换为TXT文件，按照截取标识，文件转换情况如下：;
-	/* 关闭 SAS 自动 NOTE */
-	options nonotes;   
-	data _null_;
-	    set _Temp_tol_markers end=last;
-	    length filename $200;
-	    filename = scan(tem_filename, -2, '.\'); /* 提取文件名用于日志显示 */
+    /* 第二遍：根据标识情况逐文件输出 */
+    data _null_;
+        set _Temp_tol_markers;
+        length outpath $2000 line $32767 basename $512 outputdir $2000 readpath $2000;
+        outputdir = symget('output_dir');
+        basename = substr(filename, 1, lengthn(filename)-4);
+        outpath = cats(outputdir, '\', basename, '.txt');
 
-	    if has_start_markers = 1 and has_end_markers = 1 then do;
-	        put "Note: " filename "按开始截取标识和截取结束标识完成转换。";
-	    end;
-	    else if has_start_markers = 0 and has_end_markers = 1 then do;
-	        put "WARNING: " filename "未找到开始截断标识，从文件开始已转换至截取结束标识处。";
-	    end;
-	    /* 如果有开始标识但没有结束标识，可根据业务需求补充提示 */
-	    else if has_start_markers = 1 and has_end_markers = 0 then do;
-	        put "WARNING: " filename "找到开始截断标识但未找到结束标识，从开始标识处已转换至文件末尾。";
-	    end;
-		else if has_start_markers = 0 and has_end_markers = 0 then do;
-	        put "WARNING: " filename "未找到任何截取标识，已转换全文。";
-	    end;
-	run;
+        started = 0;
+        all_output = (has_start_markers = 0);
 
-	/* 删除过程数据集 */
-	proc delete data = _Temp_tol_markers ;
-	quit;
-	/* 恢复 NOTE 输出 */
-	options notes;     
+        put "处理文件: " filepath;
+        put "输出文件: " outpath;
+
+        readpath=filepath;
+        file outref filevar=outpath;
+        infile inref filevar=readpath end=eof truncover;
+        do until(eof);
+            input line $char32767.;
+
+            if all_output then put line;
+            else do;
+                if find(upcase(line), upcase("&start_marker.")) then started=1;
+                else if find(upcase(line), upcase("&end_marker.")) then started=0;
+                else if started=1 then put line;
+            end;
+        end;
+    run;
+
+    /* ------------------------输出转换情况汇总------------------------ */
+    %put NOTE: 已完成SAS文件转换为TXT文件，按照截取标识，文件转换情况如下：;
+
+    options nonotes;
+    data _null_;
+        set _Temp_tol_markers;
+        length basename $512;
+        basename = substr(filename, 1, lengthn(filename)-4);
+
+        if has_start_markers=1 and has_end_markers=1 then
+            put "Note: " basename "按开始截取标识和截取结束标识完成转换。";
+        else if has_start_markers=0 and has_end_markers=1 then
+            put "WARNING: " basename "未找到开始截断标识，从文件开始已转换至截取结束标识处。";
+        else if has_start_markers=1 and has_end_markers=0 then
+            put "WARNING: " basename "找到开始截断标识但未找到结束标识，从开始标识处已转换至文件末尾。";
+        else if has_start_markers=0 and has_end_markers=0 then
+            put "WARNING: " basename "未找到任何截取标识，已转换全文。";
+    run;
+
+    proc delete data=_Temp_tol_markers _SAS_filelist;
+    quit;
+    options notes;
 %end;
 
 %mend;
